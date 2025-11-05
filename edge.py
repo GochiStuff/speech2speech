@@ -1,145 +1,132 @@
-#!/usr/bin/env python3
-
-"""
-Real-time Speech-to-Speech Translation Pipeline.
-
-This script captures audio from the microphone, detects speech, transcribes it,
-translates it to a target language, synthesizes the translation back to speech,
-and plays it back with minimal latency.
-
-It uses a pre-buffering and robust decoding approach (via ffmpeg) to handle
-various TTS output formats and ensure smooth playback.
-
-Requirements: ffmpeg on PATH, and Python packages:
-pip install edge-tts faster-whisper transformers sounddevice numpy torch
-"""
-
+import time
+import threading
+import queue
+import traceback
+import asyncio
+import shutil
+import subprocess
 import numpy as np
 import sounddevice as sd
 import torch
 import torch.hub
-import time
-import threading
-import queue
 import keyboard
-import traceback
-import asyncio
 import edge_tts
 from faster_whisper import WhisperModel
-from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
-
-import shutil
-import subprocess
+from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer, MarianMTModel, MarianTokenizer
 
 # --------------------------
 # --- CONFIGURATION
 # --------------------------
 
 SAMPLE_RATE = 16000
-TARGET_LANG = "fr"  # Target language code (e.g., "fr", "es", "de")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-# ASR (Whisper) model
-# "base" is faster than "small". Use "tiny" for even more speed, but less accuracy.
 ASR_MODEL_NAME = "base"
 
-# Translation model
-TRANSLATOR_MODEL = "facebook/m2m100_418M"
+# "marian_en_fr" (Helsinki-NLP English to French)
+# "m2m100_fr"    (Facebook M2M100 to fr ) // CHAN BE CHANGED 
+# "marian_en_hi" (Helsinki-NLP English to Hindi)
+# "m2m100_hi"    (Facebook M2M100 to Hindi)
 
-# TTS (Edge-TTS) voice
-TTS_VOICE = "fr-FR-HenriNeural"  # Example for French
+SELECTED_TRANSLATOR = "marian_en_hi"
+
+TRANSLATOR_CONFIGS = {
+    "marian_en_fr": {
+        "type": "marian",
+        "model_name": "Helsinki-NLP/opus-mt-en-fr",
+        "target_lang_code": "fr",
+        "tts_voice": "fr-FR-HenriNeural",
+    },
+    "m2m100_fr": {
+        "type": "m2m100",
+        "model_name": "facebook/m2m100_418M",
+        "target_lang_code": "fr", 
+        "tts_voice": "fr-FR-HenriNeural",
+    },
+    "marian_en_hi": {
+        "type": "marian",
+        "model_name": "Helsinki-NLP/opus-mt-en-hi",
+        "target_lang_code": "hi",
+        "tts_voice": "hi-IN-MadhurNeural",
+    },
+    "m2m100_hi": {
+        "type": "m2m100",
+        "model_name": "facebook/m2m100_418M",
+        "target_lang_code": "hi",
+        "tts_voice": "hi-IN-MadhurNeural",
+    }
+}
+
+# --- Apply Selected Config ---
+if SELECTED_TRANSLATOR not in TRANSLATOR_CONFIGS:
+    raise ValueError(f"Unknown translator config: {SELECTED_TRANSLATOR}. Must be one of {list(TRANSLATOR_CONFIGS.keys())}")
+
+CONFIG = TRANSLATOR_CONFIGS[SELECTED_TRANSLATOR]
+TRANSLATOR_TYPE = CONFIG["type"]
+TRANSLATOR_MODEL = CONFIG["model_name"]
+TARGET_LANG = CONFIG["target_lang_code"] # m2m100 needs this
+TTS_VOICE = CONFIG["tts_voice"]
+# --- End Model Selection ---
+
 TTS_FORMAT = "raw-16khz-16bit-mono-pcm"
-
-# How many seconds of audio to buffer for playback
-RING_SECONDS = 10
-
-# This setting is present in the original code but not actively used.
-PREBUFFER_SECS = 0.12
-
-# --- VAD (Voice Activity Detection) ---
-VAD_THRESHOLD = 0.5  # Confidence threshold for speech
-# LOWERED for faster response: Milliseconds of silence to trigger end-of-phrase
-VAD_MIN_SILENCE_MS = 400
-VAD_MAX_PHRASE_S = 7  # Maximum length of a phrase in seconds
-VAD_SAMPLES_PER_CHUNK = 512  # Audio chunk size for VAD processing
-
-# --- Audio Device ---
-SD_BLOCKSIZE = 512  # Frames per audio callback.
-
+RING_SECONDS = 5
+VAD_THRESHOLD = 0.4
+VAD_MIN_SILENCE_MS = 200
+VAD_MAX_PHRASE_S = 4
+VAD_SAMPLES_PER_CHUNK = 512
+SD_BLOCKSIZE = 512
 
 # --------------------------
 # --- LOGGING
 # --------------------------
 
 def log(msg: str):
-    """Prints a message with a timestamp."""
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
-
 
 # --------------------------
 # --- AUDIO DECODING
 # --------------------------
 
 def ffmpeg_decode_to_pcm_s16le(input_bytes: bytes, rate: int = SAMPLE_RATE) -> bytes:
-    """
-    Decodes any audio format (from bytes) into raw 16-bit PCM.
-    """
     ffmpeg_path = shutil.which("ffmpeg")
     if not ffmpeg_path:
         raise FileNotFoundError("ffmpeg binary not found on PATH. Please install ffmpeg.")
 
     cmd = [
         ffmpeg_path,
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", "pipe:0",  # Input from stdin
-        "-f", "s16le",  # Format: signed 16-bit little-endian
-        "-ar", str(rate),  # Sample rate
-        "-ac", "1",  # Mono channel
-        "pipe:1",  # Output to stdout
+        "-hide_banner", "-loglevel", "error",
+        "-i", "pipe:0",
+        "-f", "s16le",
+        "-ar", str(rate),
+        "-ac", "1",
+        "pipe:1",
     ]
-
     proc = subprocess.run(cmd, input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     if proc.returncode != 0:
-        err_msg = proc.stderr.decode('utf-8', errors='ignore')
-        raise RuntimeError(f"ffmpeg decode failed. Error: {err_msg}")
-
+        raise RuntimeError(f"ffmpeg decode failed. Error: {proc.stderr.decode('utf-8', errors='ignore')}")
     return proc.stdout
-
 
 # --------------------------
 # --- RING BUFFER
 # --------------------------
 
 class RingBuffer:
-    """
-    A thread-safe, overwriting ring buffer for audio (float32 samples).
-    """
-
     def __init__(self, capacity_samples: int):
         self.capacity = int(capacity_samples)
         self.buf = np.zeros(self.capacity, dtype=np.float32)
         self.write_pos = 0
         self.read_pos = 0
-        self.available = 0  # Samples available to read
+        self.available = 0
         self.lock = threading.Lock()
 
     def write(self, data: np.ndarray):
-        """
-        Write data to the buffer.
-        
-        If the buffer is full, it overwrites the *oldest* data.
-        """
         with self.lock:
             n = data.shape[0]
-
             if n >= self.capacity:
                 data = data[-self.capacity:]
                 n = data.shape[0]
 
             free_space = self.capacity - self.available
-
             if n > free_space:
                 overflow = n - free_space
                 self.read_pos = (self.read_pos + overflow) % self.capacity
@@ -151,7 +138,6 @@ class RingBuffer:
             else:
                 first_part_len = self.capacity - self.write_pos
                 self.buf[self.write_pos:] = data[:first_part_len]
-
                 second_part_len = end % self.capacity
                 self.buf[:second_part_len] = data[first_part_len:]
 
@@ -159,11 +145,6 @@ class RingBuffer:
             self.available = min(self.capacity, self.available + n)
 
     def read(self, n: int) -> np.ndarray:
-        """
-        Read up to 'n' samples from the buffer.
-        
-        Returns an array of size 'n', zero-padded if silent.
-        """
         with self.lock:
             samples_to_read = min(n, self.available)
             out = np.zeros(n, dtype=np.float32)
@@ -175,22 +156,16 @@ class RingBuffer:
                 else:
                     first_part_len = self.capacity - self.read_pos
                     out[:first_part_len] = self.buf[self.read_pos:]
-
                     second_part_len = end % self.capacity
                     out[first_part_len:samples_to_read] = self.buf[:second_part_len]
 
                 self.read_pos = (self.read_pos + samples_to_read) % self.capacity
                 self.available -= samples_to_read
-
             return out
 
     def get_available(self):
         with self.lock:
             return self.available
-
-    def get_free_space(self):
-        with self.lock:
-            return self.capacity - self.available
 
 # --------------------------
 # --- GLOBAL STATE
@@ -208,12 +183,17 @@ stream = None
 
 log(f"🚀 Using device: {DEVICE}")
 log(f"Loading ASR model ({ASR_MODEL_NAME})...")
-# You can also experiment with compute_type="float16" if you have a good GPU
 asr = WhisperModel(ASR_MODEL_NAME, device=DEVICE, compute_type="int8")
 
-log("Loading translation model (M2M100)...")
-tokenizer = M2M100Tokenizer.from_pretrained(TRANSLATOR_MODEL)
-translator = M2M100ForConditionalGeneration.from_pretrained(TRANSLATOR_MODEL).to(DEVICE)
+log(f"Loading translation model ({TRANSLATOR_MODEL} | Type: {TRANSLATOR_TYPE})...")
+if TRANSLATOR_TYPE == "m2m100":
+    tokenizer = M2M100Tokenizer.from_pretrained(TRANSLATOR_MODEL)
+    translator = M2M100ForConditionalGeneration.from_pretrained(TRANSLATOR_MODEL).to(DEVICE)
+elif TRANSLATOR_TYPE == "marian":
+    tokenizer = MarianTokenizer.from_pretrained(TRANSLATOR_MODEL)
+    translator = MarianMTModel.from_pretrained(TRANSLATOR_MODEL).to(DEVICE)
+else:
+    raise ValueError(f"Unknown TRANSLATOR_TYPE: {TRANSLATOR_TYPE}")
 
 log("Loading VAD model (Silero)...")
 vad_model, vad_utils = torch.hub.load(repo_or_dir="snakers4/silero-vad", model="silero_vad", force_reload=False, onnx=False)
@@ -227,10 +207,6 @@ log("✅ All models loaded and ready.")
 # --------------------------
 
 def record_audio():
-    """
-    Continuously captures audio from the microphone and puts it into
-    the 'audio_queue'.
-    """
     def callback(indata, frames, time_info, status):
         if status:
             log(f"⚠️ Microphone input status: {status}")
@@ -243,25 +219,18 @@ def record_audio():
 
     log("🎙️ Stopped listening.")
 
-
 # --------------------------
 # --- ASR & TRANSLATE THREAD
 # --------------------------
 
 def asr_translator_thread():
-    """
-    Pulls audio from 'audio_queue', runs VAD, ASR, and Translation.
-    Puts translated text into 'text_queue'.
-    """
     global vad_model
-
     phrase_buffer = np.zeros(0, dtype=np.float32)
     buffer = np.zeros(0, dtype=np.float32)
     last_text = ""
     last_speech_time = time.time()
 
     log("🎤 ASR/Translation thread started.")
-
     while not stop_flag.is_set():
         try:
             while not audio_queue.empty():
@@ -283,7 +252,6 @@ def asr_translator_thread():
                 last_speech_time = time.time()
 
             trigger_process = False
-
             if not is_speech and len(phrase_buffer) > 0:
                 if time.time() - last_speech_time > (VAD_MIN_SILENCE_MS / 1000.0):
                     trigger_process = True
@@ -312,16 +280,21 @@ def asr_translator_thread():
 
                 t_start = time.time()
                 try:
-                    tokenizer.src_lang = info.language
-                    inputs = tokenizer(text, return_tensors="pt").to(DEVICE)
-                    bos = tokenizer.get_lang_id(TARGET_LANG)
+                    translated = ""
+                    if TRANSLATOR_TYPE == "m2m100":
+                        tokenizer.src_lang = info.language
+                        inputs = tokenizer(text, return_tensors="pt").to(DEVICE)
+                        bos = tokenizer.get_lang_id(TARGET_LANG)
+                        outputs = translator.generate(**inputs, forced_bos_token_id=bos)
+                        translated = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
 
-                    outputs = translator.generate(**inputs, forced_bos_token_id=bos)
-                    translated = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
+                    elif TRANSLATOR_TYPE == "marian":
+                        inputs = tokenizer(text, return_tensors="pt").to(DEVICE)
+                        outputs = translator.generate(**inputs)
+                        translated = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
 
                     t_trans = time.time() - t_start
                     log(f"💬  [Translate in {t_trans:.2f}s] ({TARGET_LANG}): {translated}")
-
                     text_queue.put(translated)
 
                 except Exception as e:
@@ -339,17 +312,9 @@ def asr_translator_thread():
 # --------------------------
 
 async def safe_edge_tts_collect(text: str) -> bytes:
-    """
-    Collect the full audio bytes for one utterance from edge-tts.
-    
-    This simplified version uses the one reliable method that works
-    with the current edge-tts API, removing the noisy errors.
-    """
     try:
-        # This is the "third attempt" from the old code, which works.
         comm = edge_tts.Communicate(text, TTS_VOICE)
         bytes_acc = bytearray()
-
         async for chunk in comm.stream():
             if isinstance(chunk, dict) and chunk.get("type") == "audio" and chunk.get("data"):
                 bytes_acc.extend(chunk["data"])
@@ -358,26 +323,18 @@ async def safe_edge_tts_collect(text: str) -> bytes:
             return bytes(bytes_acc)
         else:
             log(f"⚠️ TTS returned no audio bytes for text: {text[:50]}...")
-            return b"" # Return empty bytes
-
+            return b""
     except Exception as e:
         log(f"❌ All edge-tts streaming attempts failed for text: {text[:50]}...")
         log(f"   Error: {e}")
-        # Re-raise the exception so the outer loop can handle it
         raise e
-
 
 # --------------------------
 # --- TTS GENERATOR THREAD
 # --------------------------
 
 async def amain_tts_generator():
-    """
-    Pulls translated text from 'text_queue', generates audio,
-    decodes it, and writes it to the 'ring' buffer.
-    """
     log("▶️ Async TTS Generator started.")
-
     while not stop_flag.is_set():
         try:
             try:
@@ -389,9 +346,7 @@ async def amain_tts_generator():
             t_start = time.time()
             log(f"Synthesizing: \"{text[:60]}...\"")
 
-            # 2. Generate audio bytes
             raw_bytes = await safe_edge_tts_collect(text)
-
             if not raw_bytes:
                 log("⚠️ TTS returned no audio bytes.")
                 continue
@@ -399,7 +354,6 @@ async def amain_tts_generator():
             t_tts = time.time()
             log(f"   ... TTS generation complete ({len(raw_bytes)} bytes) in {t_tts - t_start:.2f}s")
 
-            # 3. Decode bytes using ffmpeg
             try:
                 pcm = await asyncio.to_thread(ffmpeg_decode_to_pcm_s16le, raw_bytes, SAMPLE_RATE)
             except Exception as e:
@@ -411,10 +365,9 @@ async def amain_tts_generator():
             t_decode = time.time()
             log(f"   ... ffmpeg decode complete in {t_decode - t_tts:.2f}s")
 
-            # 4. Convert to float32 and write to ring buffer
             arr = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
 
-            fade_len = int(SAMPLE_RATE * 0.01)  # 10ms
+            fade_len = int(SAMPLE_RATE * 0.01) # 10ms
             if arr.size > 2 * fade_len:
                 arr[:fade_len] *= np.linspace(0.0, 1.0, fade_len)
                 arr[-fade_len:] *= np.linspace(1.0, 0.0, fade_len)
@@ -429,31 +382,23 @@ async def amain_tts_generator():
 
     log("🛑 Async TTS Generator stopped.")
 
-
 def tts_generator_thread():
-    """Wrapper to run the async TTS generator in a dedicated thread."""
     try:
         asyncio.run(amain_tts_generator())
     except Exception as e:
         log(f"💥 TTS Generator Thread CRASHED: {e}")
         traceback.print_exc()
 
-
 # --------------------------
 # --- PLAYBACK CALLBACK
 # --------------------------
 
 def playback_callback(outdata, frames, time_info, status):
-    """
-    The audio output callback. Reads from the 'ring' buffer.
-    """
     global ring
     if status:
         log(f"⚠️ Playback stream status: {status}")
-
     data = ring.read(frames)
     outdata[:] = data.reshape(-1, 1)
-
 
 # --------------------------
 # --- MAIN CONTROL LOOP
@@ -514,8 +459,8 @@ def main():
 
                     sd.stop()
                     log("🛑 Session STOPPED.")
-
-                time.sleep(0.5)
+                
+                time.sleep(0.5) # Debounce SPACE key
 
             time.sleep(0.05)
 
@@ -530,9 +475,8 @@ def main():
         if stream:
             stream.stop()
             stream.close()
-        sd.stop() 
+        sd.stop()
         log("Cleanup complete. Goodbye!")
-
 
 if __name__ == "__main__":
     main()
