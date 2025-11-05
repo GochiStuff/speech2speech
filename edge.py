@@ -30,7 +30,6 @@ from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
 
 import shutil
 import subprocess
-import io
 
 # --------------------------
 # --- CONFIGURATION

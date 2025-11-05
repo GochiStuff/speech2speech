@@ -1,9 +1,13 @@
-numpy==1.26.4
-sounddevice==0.4.6
+
+numpy==1.22.0
+sounddevice==0.5.3
 resampy==0.4.3
-torch==2.2.2
-faster-whisper==1.0.1
-transformers==4.38.2
-edge-tts==6.1.8
+faster-whisper==1.2.0
+torch==2.5.1
+transformers==4.57.1
+edge-tts==7.2.1
 keyboard==0.13.5
-TTS==0.22.0
+sentencepiece
+keyboard
+torchaudio
+# TTS==0.22.0 for whisper local only .
