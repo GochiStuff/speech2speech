@@ -27,7 +27,7 @@ ASR_MODEL_NAME = "base"
 # "marian_en_hi" (Helsinki-NLP English to Hindi)
 # "m2m100_hi"    (Facebook M2M100 to Hindi)
 
-SELECTED_TRANSLATOR = "marian_en_hi"
+SELECTED_TRANSLATOR = "marian_en_fr"
 
 TRANSLATOR_CONFIGS = {
     "marian_en_fr": {
@@ -71,7 +71,7 @@ TTS_FORMAT = "raw-16khz-16bit-mono-pcm"
 RING_SECONDS = 5
 VAD_THRESHOLD = 0.4
 VAD_MIN_SILENCE_MS = 200
-VAD_MAX_PHRASE_S = 4
+VAD_MAX_PHRASE_S = 5
 VAD_SAMPLES_PER_CHUNK = 512
 SD_BLOCKSIZE = 512
 
