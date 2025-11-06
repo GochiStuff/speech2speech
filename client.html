@@ -1,0 +1,606 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Realtime Translator (Pro Studio)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<style>
+  :root {
+    --bg-main: #121212;
+    --bg-module: #1E1E1E;
+    --border-color: #333;
+    --text-primary: #EFEFEF;
+    --text-secondary: #B3B3B3;
+    --accent-blue: #007AFF;
+    --accent-red: #FF3B30;
+    --accent-green: #34C759;
+  }
+
+  body{
+    font-family: Inter, system-ui, sans-serif;
+    max-width: 1200px;
+    margin: 24px auto;
+    padding: 12px;
+    background: var(--bg-main);
+    color: var(--text-primary);
+  }
+  
+  h2, h3 { margin: 0 0 16px 0; color: #fff; }
+  h3 { font-size: 1.1rem; color: var(--text-secondary); }
+
+  .row{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+  
+  button, select {
+    padding: 10px 16px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: #282828;
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  button:hover { background: #333; }
+  select { padding: 10px 8px; }
+
+  /* --- Premium Button Styles --- */
+  #startStopBtn {
+    font-weight: bold;
+    background-color: var(--accent-blue);
+    border-color: var(--accent-blue);
+    color: white;
+  }
+  #startStopBtn.stop {
+    background-color: var(--accent-red);
+    border-color: var(--accent-red);
+  }
+  #startStopBtn:disabled {
+    background: #444;
+    border-color: #555;
+    cursor: not-allowed;
+  }
+
+  /* --- Main Layout --- */
+  .master-controls {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    padding: 20px;
+    background: var(--bg-module);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    margin: 16px 0;
+  }
+  
+  .main-grid {
+    display: grid;
+    grid-template-columns: 1fr 2fr;
+    gap: 18px;
+    margin-top: 18px;
+  }
+
+  /* --- Module Styling ("Cards") --- */
+  .module {
+    background: var(--bg-module);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 20px;
+  }
+
+  /* --- VAD Tuning Module --- */
+  .param{
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .param label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+  }
+  .param label span { color: var(--text-primary); }
+  input[type="range"] {
+    width: 100%;
+    margin-top: 4px;
+    padding: 0;
+    background: transparent;
+    border: none;
+  }
+  .vad-status {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-color);
+  }
+  #vadDot{
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #444;
+    transition: background 0.2s, box-shadow 0.2s;
+  }
+  #vadDot.on{
+    background: var(--accent-green);
+    box-shadow: 0 0 8px var(--accent-green);
+  }
+  .meta{font-size:0.9rem; color: var(--text-secondary);}
+  #calibrate {
+    width: 100%;
+    background: #333;
+  }
+
+  /* --- Output Module --- */
+  .output-group { display: flex; gap: 12px; }
+  textarea{
+    width: 100%;
+    height: 150px;
+    background:#0d1117;
+    color:#fff;
+    border-radius:8px;
+    padding:10px;
+    border:1px solid #222;
+    font-size: 1rem;
+  }
+
+  /* --- History Module --- */
+  .log{
+    height: 250px;
+    overflow:auto;
+    border-top: 1px solid var(--border-color);
+    padding-top: 10px;
+  }
+  .log div {
+    padding: 8px 10px;
+    border-bottom: 1px solid #2a2a2a;
+  }
+  .log div.asr { color: #EFEFEF; }
+  .log div.tgt { color: #34AADC; }
+  .log div.asr strong { color: #FFF; }
+  .log div.tgt strong { color: #87CEEB; }
+  
+  /* Hide the HTML audio player */
+  #player { display: none; }
+  
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <h2>Realtime Translator (Pro)</h2>
+
+  <div class="master-controls">
+    <select id="lang">
+      <option value="en→fr">English → French</option>
+      <option value="en→hi">English → Hindi</option>
+      <option value="en→fr-m2m">English → French (m2m)</option>
+    </select>
+    
+    <button id="startStopBtn">Start</button>
+  </div>
+
+  <div class="main-grid">
+
+    <div class="module">
+      <h3>VAD Tuning</h3>
+      
+      <div class="param">
+        <label>Sensitivity (multiplier) <span id="sensVal">1.6</span></label>
+        <input id="sensitivity" type="range" min="0.6" max="3.0" step="0.05" value="1.6">
+      </div>
+      <div class="param">
+        <label>Hangover (ms) <span id="hangVal">300</span></label>
+        <input id="hangover" type="range" min="100" max="1200" step="50" value="300">
+      </div>
+      <div class="param">
+        <label>Pre-buffer (ms) <span id="preVal">180</span></label>
+        <input id="prebuffer" type="range" min="0" max="800" step="20" value="180">
+      </div>
+      
+      <button id="calibrate">Manual Calibrate</button>
+
+      <div class="vad-status">
+        <div class="meta">VAD Status: <span id="vadDot"></span></div>
+        <div class="meta">Mic RMS: <span id="rmsVal">0.000</span></div>
+      </div>
+    </div>
+
+    <div class="module">
+      <h3>Realtime Output</h3>
+      <div class="output-group">
+        <textarea id="src" readonly placeholder="ASR source..."></textarea>
+        <textarea id="tgt" readonly placeholder="Translation..."></textarea>
+      </div>
+
+      <h3 style="margin-top: 24px;">Translation History</h3>
+      <div class="log" id="log"></div>
+    </div>
+
+  </div> </div> <audio id="player" controls autoplay></audio>
+
+<script>
+/* Final Script: Client-side VAD with "Pro Studio" UI
+   - All controls are visible by default.
+   - "Start" button auto-connects, starts mic, and auto-calibrates.
+   - Manual calibration button is still available.
+   - Clean history log remains.
+*/
+
+const WS_URL = "ws://localhost:8000/ws";
+let ws = null;
+const logEl = document.getElementById('log');
+const vadDot = document.getElementById('vadDot');
+const rmsVal = document.getElementById('rmsVal');
+
+/**
+ * Logs messages ONLY to the developer console (F12).
+ * The UI log is now reserved for history.
+ */
+function console_log(msg){
+  console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
+}
+
+/**
+ * Adds a new entry to the on-screen HISTORY log.
+ * @param {'asr' | 'tgt'} type - The type of message.
+ * @param {string} text - The text to display.
+ */
+function add_history(type, text) {
+  if (!text || text.trim() === '') return; // Don't add empty entries
+  const d = document.createElement('div');
+  if (type === 'asr') {
+    d.className = 'asr';
+    d.innerHTML = `<strong>You:</strong> ${text}`;
+  } else { // 'tgt'
+    d.className = 'tgt';
+    d.innerHTML = `<strong>Translation:</strong> ${text}`;
+  }
+  logEl.prepend(d); // Add to the top
+}
+
+function setText(id, v){ document.getElementById(id).value = v; }
+
+// --- New "Pro" UI Logic ---
+
+const startStopBtn = document.getElementById('startStopBtn');
+let isRunning = false;
+let audioCtx = null;
+let micStream = null;
+let workletNode = null;
+let isMicOn = false;
+
+startStopBtn.onclick = async () => {
+  if (isRunning) {
+    // --- STOP ---
+    stopMic();
+    if (ws) ws.close();
+    startStopBtn.textContent = 'Start';
+    startStopBtn.classList.remove('stop');
+    isRunning = false;
+  } else {
+    // --- START ---
+    try {
+      startStopBtn.textContent = 'Connecting...';
+      startStopBtn.disabled = true;
+
+      // 1. Connect WS
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        await new Promise((resolve, reject) => {
+          ws = new WebSocket(WS_URL);
+          ws.binaryType = 'arraybuffer';
+          ws.onopen = () => {
+            console_log('WS connected');
+            ws.send(JSON.stringify({type:'set_lang', pair: document.getElementById('lang').value}));
+            resolve();
+          };
+          ws.onmessage = ws_onmessage_handler; // Assign handler
+          ws.onclose = () => {
+            console_log('WS closed');
+            if (isRunning) stopMic(); // Ensure mic stops if WS drops
+            startStopBtn.textContent = 'Start';
+            startStopBtn.classList.remove('stop');
+            isRunning = false;
+            startStopBtn.disabled = false;
+          };
+          ws.onerror = (e) => {
+            console_log('WS error: ' + (e.message || e));
+            reject(e);
+          };
+        });
+      }
+
+      // 2. Start Mic
+      startStopBtn.textContent = 'Starting Mic...';
+      await startMic(); // This function is defined below
+      if (!isMicOn) throw new Error("Mic failed to start.");
+
+      // 3. Auto-Calibrate
+      startStopBtn.textContent = 'Calibrating...';
+      await document.getElementById('calibrate').click(); // Trigger manual calibrate function
+      
+      startStopBtn.textContent = 'Stop';
+      startStopBtn.classList.add('stop');
+      startStopBtn.disabled = false;
+      isRunning = true;
+      
+    } catch (err) {
+      console_log('Failed to start: ' + err);
+      alert('Failed to start. Check mic permissions and WebSocket connection. See console (F12) for details.');
+      startStopBtn.textContent = 'Start';
+      startStopBtn.disabled = false;
+      if (ws) ws.close();
+      stopMic();
+    }
+  }
+};
+
+
+// --- WebSocket Message Handler ---
+
+function ws_onmessage_handler(evt) {
+  if (typeof evt.data === 'string'){
+    try {
+      const j = JSON.parse(evt.data);
+      if (j.type === 'asr') {
+        setText('src', j.text);
+        add_history('asr', j.text); // Add to history
+      }
+      else if (j.type === 'translate') {
+        setText('tgt', j.text);
+        add_history('tgt', j.text); // Add to history
+      }
+      else if (j.type === 'audio_start') { console_log('Incoming audio ' + (j.len_bytes||'')); }
+      else console_log('MSG: ' + JSON.stringify(j));
+    } catch (e) {
+      console_log('TEXT: ' + evt.data);
+    }
+    return;
+  }
+  // audio binary -> play
+  const blob = new Blob([evt.data], {type:'audio/mpeg'});
+  const url = URL.createObjectURL(blob);
+  const player = document.getElementById('player');
+  player.src = url;
+  console_log('Playing audio ' + evt.data.byteLength + ' bytes');
+  setTimeout(()=>URL.revokeObjectURL(url), 60000);
+}
+
+
+// --- VAD & Audio Processing Logic ---
+
+// VAD & buffer state
+let ambientRMS = 0.0025;   // default ambient RMS
+let sensitivity = parseFloat(document.getElementById('sensitivity').value); // multiplier
+let startThresh = ambientRMS * sensitivity;
+let contThresh = startThresh * 0.6;
+let hangoverMs = parseInt(document.getElementById('hangover').value, 10);
+let prebufferMs = parseInt(document.getElementById('prebuffer').value, 10);
+
+document.getElementById('sensitivity').oninput = (e) => {
+  sensitivity = parseFloat(e.target.value);
+  document.getElementById('sensVal').textContent = sensitivity.toFixed(2);
+  updateThresholds();
+};
+document.getElementById('hangover').oninput = (e) => {
+  hangoverMs = parseInt(e.target.value, 10);
+  document.getElementById('hangVal').textContent = hangoverMs;
+};
+document.getElementById('prebuffer').oninput = (e) => {
+  prebufferMs = parseInt(e.target.value, 10);
+  document.getElementById('preVal').textContent = prebufferMs;
+};
+
+function updateThresholds(){
+  startThresh = ambientRMS * sensitivity;
+  contThresh = startThresh * 0.6;
+  // console_log(`Thresholds updated: start=${startThresh.toFixed(5)} continue=${contThresh.toFixed(5)} (ambient=${ambientRMS.toFixed(5)})`);
+}
+
+// calibration: measure ~1s of ambient audio RMS
+document.getElementById('calibrate').onclick = async () => {
+  if (!micStream) {
+    console_log('Start mic first to calibrate ambient.');
+    return;
+  }
+  console_log('Calibrating ambient noise for 1s...');
+  // collect ~1s
+  const sampleCount = audioCtx.sampleRate * 1.0;
+  let collected = [];
+  await new Promise((resolve) => {
+    const listener = (ev) => {
+      const arr = ev.data;
+      for (let i=0;i<arr.length;i++) collected.push(arr[i]);
+      if (collected.length >= sampleCount) {
+        workletNode.port.removeEventListener('message', listener);
+        resolve();
+      }
+    };
+    workletNode.port.addEventListener('message', listener);
+  });
+  // compute RMS
+  let sum = 0;
+  for (let i=0;i<collected.length;i++) sum += collected[i]*collected[i];
+  ambientRMS = Math.sqrt(sum / collected.length);
+  updateThresholds();
+  console_log('Calibration done. ambientRMS=' + ambientRMS.toFixed(6));
+};
+
+// accumulation buffers & state
+let sendBuffer = [];  // floats in input sample rate
+let preBuffer = [];   // circular prebuffer floats
+let speaking = false;
+let lastVoiceAt = 0;
+const OUT_RATE = 16000;
+
+// helper to set vad indicator
+function setVad(on){
+  if (on) vadDot.classList.add('on'); else vadDot.classList.remove('on');
+}
+
+// audioWorklet processor code (inline)
+const workletCode = `
+class MicProcessor extends AudioWorkletProcessor {
+  process(inputs) {
+    try {
+      const ch = inputs[0];
+      if (ch && ch[0]) {
+        const buffer = new Float32Array(ch[0].length);
+        buffer.set(ch[0]);
+        this.port.postMessage(buffer, [buffer.buffer]);
+      }
+    } catch(e) {}
+    return true;
+  }
+}
+registerProcessor('mic-processor', MicProcessor);
+`;
+
+async function startMic(){
+  if (isMicOn) return;
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({audio:true});
+  } catch (e) {
+    console_log('Mic permission error: ' + e);
+    isMicOn = false;
+    return;
+  }
+
+  audioCtx = new AudioContext({sampleRate:48000});
+  try { await audioCtx.resume(); } catch(e){}
+  const blob = new Blob([workletCode], {type:'application/javascript'});
+  const url = URL.createObjectURL(blob);
+  await audioCtx.audioWorklet.addModule(url);
+  URL.revokeObjectURL(url);
+
+  const src = audioCtx.createMediaStreamSource(micStream);
+  workletNode = new AudioWorkletNode(audioCtx, 'mic-processor');
+
+  // compute prebuffer length in input samples
+  const preSamples = Math.round((prebufferMs / 1000) * audioCtx.sampleRate);
+  // preBuffer is circular: keep last preSamples floats
+  preBuffer = [];
+
+  workletNode.port.onmessage = (ev) => {
+    const float32 = ev.data; // Float32Array
+    // update prebuffer (circular)
+    if (preSamples > 0) {
+      if (preBuffer.length + float32.length <= preSamples) {
+        for (let i=0;i<float32.length;i++) preBuffer.push(float32[i]);
+      } else {
+        preBuffer = preBuffer.concat(Array.from(float32));
+        if (preBuffer.length > preSamples) preBuffer = preBuffer.slice(preBuffer.length - preSamples);
+      }
+    }
+
+    // compute RMS on this block
+    let sum = 0;
+    for (let i=0;i<float32.length;i++) sum += float32[i]*float32[i];
+    const rms = Math.sqrt(sum / float32.length);
+    rmsVal.textContent = rms.toFixed(5);
+
+    const nowTs = performance.now();
+
+    // Update thresholds (in case user changed UI)
+    sensitivity = parseFloat(document.getElementById('sensitivity').value);
+    hangoverMs = parseInt(document.getElementById('hangover').value, 10);
+    prebufferMs = parseInt(document.getElementById('prebuffer').value, 10);
+    updateThresholds();
+
+    if (!speaking) {
+      if (rms > startThresh) {
+        // speech started
+        speaking = true;
+        setVad(true);
+        lastVoiceAt = nowTs;
+        if (preBuffer.length > 0) {
+          for (let i=0;i<preBuffer.length;i++) sendBuffer.push(preBuffer[i]);
+        }
+        for (let i=0;i<float32.length;i++) sendBuffer.push(float32[i]);
+        console_log('VAD start rms=' + rms.toFixed(5));
+      }
+    } else {
+      // currently speaking
+      for (let i=0;i<float32.length;i++) sendBuffer.push(float32[i]);
+      if (rms > contThresh) {
+        lastVoiceAt = nowTs;
+      }
+      if ((nowTs - lastVoiceAt) > hangoverMs) {
+        // finalize phrase
+        finalizeAndSendPhrase(sendBuffer.slice(), audioCtx.sampleRate);
+        sendBuffer = [];
+        speaking = false;
+        setVad(false);
+        console_log('VAD end (hangover)');
+      } else {
+        if (sendBuffer.length > audioCtx.sampleRate * 15) { // >15s guard
+          console_log('Warning: very long phrase, forcing flush');
+          finalizeAndSendPhrase(sendBuffer.slice(), audioCtx.sampleRate);
+          sendBuffer = [];
+          speaking = false;
+          setVad(false);
+        }
+      }
+    }
+  };
+
+  src.connect(workletNode).connect(audioCtx.destination);
+  isMicOn = true;
+  console_log('Mic started (sampleRate=' + audioCtx.sampleRate + ')');
+}
+
+function stopMic(){
+  if (!isMicOn) return;
+  if (workletNode) { workletNode.disconnect(); workletNode.port.onmessage = null; workletNode = null; }
+  if (audioCtx) { try { audioCtx.close(); } catch(e) {} audioCtx = null; }
+  if (micStream) { micStream.getTracks().forEach(t=>t.stop()); micStream=null; }
+  sendBuffer = [];
+  preBuffer = [];
+  speaking = false;
+  setVad(false);
+  isMicOn = false;
+  console_log('Mic stopped');
+}
+
+function linearResampleFloat32(input, inRate, outRate) {
+  const outLen = Math.max(128, Math.round(input.length * outRate / inRate));
+  const out = new Float32Array(outLen);
+  const ratio = input.length / outLen;
+  for (let i=0;i<outLen;i++){
+    const idx = i * ratio;
+    const i0 = Math.floor(idx);
+    const i1 = Math.min(Math.ceil(idx), input.length - 1);
+    const t = idx - i0;
+    out[i] = (1 - t) * input[i0] + t * input[i1];
+  }
+  return out;
+}
+
+function finalizeAndSendPhrase(floatArr, inRate) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    console_log('WS not open — dropping phrase');
+    return;
+  }
+  if (!floatArr || floatArr.length === 0) return;
+  // resample to 16k
+  const out = linearResampleFloat32(floatArr, inRate, OUT_RATE);
+  // convert to Int16
+  const int16 = new Int16Array(out.length);
+  for (let i=0;i<out.length;i++){
+    let s = Math.max(-1, Math.min(1, out[i]));
+    int16[i] = s < 0 ? Math.round(s * 0x8000) : Math.round(s * 0x7FFF);
+  }
+  try {
+    ws.send(JSON.stringify({type:'speech_start', ts: Date.now()}));
+    ws.send(int16.buffer);
+    ws.send(JSON.stringify({type:'speech_end', ts: Date.now(), samples: int16.length}));
+    console_log(`Sent phrase ${int16.length} samples (~${(int16.length / OUT_RATE).toFixed(3)}s)`);
+  } catch (e) {
+    console_log('Send error: ' + e);
+  }
+}
+</script>
+</body>
+</html>
