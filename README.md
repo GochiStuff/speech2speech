@@ -1,5 +1,4 @@
-HELLO BICH
-
+TO run . 
 vevn -> py -3.10 -m venv venv 
 activate -> .\venv\Scripts\activate
 update -> python -m pip install --upgrade pip
